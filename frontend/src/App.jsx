@@ -6,6 +6,10 @@ import './index.css';
 function App() {
     const [refreshKey, setRefreshKey] = useState(0);
 
+    // Phase 2.0: Shared State for Dynamic Routing & Moving Vehicle
+    const [route, setRoute] = useState([]); // Array of [lat, lng] points (Start and Destination)
+    const [vehiclePosition, setVehiclePosition] = useState(null); // Current [lat, lng] of the vehicle
+
     const handleAnomalyDetected = () => {
         setRefreshKey(prev => prev + 1);
     };
@@ -17,10 +21,21 @@ function App() {
             </header>
 
             <div style={{ padding: '0 20px' }}>
-                <IoTSimulator onAnomalyDetected={handleAnomalyDetected} />
+                <IoTSimulator
+                    onAnomalyDetected={handleAnomalyDetected}
+                    route={route}
+                    vehiclePosition={vehiclePosition}
+                    setVehiclePosition={setVehiclePosition}
+                />
             </div>
 
-            <Map refreshKey={refreshKey} />
+            <Map
+                refreshKey={refreshKey}
+                route={route}
+                setRoute={setRoute}
+                vehiclePosition={vehiclePosition}
+                setVehiclePosition={setVehiclePosition}
+            />
         </div>
     );
 }

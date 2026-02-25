@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
-const IoTSimulator = ({ onAnomalyDetected }) => {
+const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePosition }) => {
     const [isDriving, setIsDriving] = useState(false);
     const [zValue, setZValue] = useState(1.0);
     const [statusMsg, setStatusMsg] = useState('Idle');
-    const intervalRef = useRef(null);
+
+    const dataIntervalRef = useRef(null);
+    const motionIntervalRef = useRef(null);
+    // Track our progress along the route (0.0 to 1.0)
+    const progressRef = useRef(0);
 
     // Constants
     const BASELINE_Z = 1.0;
@@ -13,38 +17,88 @@ const IoTSimulator = ({ onAnomalyDetected }) => {
     const UPPER_LIMIT = BASELINE_Z + THRESHOLD; // 1.45g
     const LOWER_LIMIT = BASELINE_Z - THRESHOLD; // 0.55g
 
-    // Trichy Bounding Box
-    const MIN_LAT = 10.78;
-    const MAX_LAT = 10.82;
-    const MIN_LNG = 78.68;
-    const MAX_LNG = 78.72;
-
-    const generateRandomCoordinate = () => {
-        const lat = Math.random() * (MAX_LAT - MIN_LAT) + MIN_LAT;
-        const lng = Math.random() * (MAX_LNG - MIN_LNG) + MIN_LNG;
-        return [lng, lat]; // GeoJSON format [longitude, latitude]
+    // --- Dynamic Routing Logic ---
+    const startDriving = () => {
+        if (!route || route.length < 2) {
+            setStatusMsg('Please click on the map to set Start and Destination points first.');
+            setIsDriving(false);
+            return;
+        }
+        setIsDriving(true);
+        setStatusMsg('Driving along route...');
+        progressRef.current = 0;
+        setVehiclePosition(route[0]);
     };
 
+    const stopDriving = () => {
+        setIsDriving(false);
+        setStatusMsg('Drive stopped.');
+    };
+
+    // Calculate Interpolation
+    useEffect(() => {
+        if (isDriving && route.length === 2) {
+            const [startLat, startLng] = route[0];
+            const [endLat, endLng] = route[1];
+
+            // Update position every 100ms
+            motionIntervalRef.current = setInterval(() => {
+                progressRef.current += 0.005; // Adjust speed here (0.005 = 200 steps)
+
+                if (progressRef.current >= 1) {
+                    clearInterval(motionIntervalRef.current);
+                    setVehiclePosition([endLat, endLng]); // Ensure it lands exactly on destination
+                    stopDriving();
+                    setStatusMsg('Destination reached!');
+                } else {
+                    const currentLat = startLat + (endLat - startLat) * progressRef.current;
+                    const currentLng = startLng + (endLng - startLng) * progressRef.current;
+                    setVehiclePosition([currentLat, currentLng]);
+                }
+            }, 100);
+        } else {
+            if (motionIntervalRef.current) clearInterval(motionIntervalRef.current);
+        }
+
+        return () => {
+            if (motionIntervalRef.current) clearInterval(motionIntervalRef.current);
+        };
+    }, [isDriving, route]);
+
+
+    // --- Anomaly Logic ---
     const reportAnomaly = async (type, zVal) => {
         setStatusMsg(`Detected ${type} at ${zVal.toFixed(2)}g! Sending to backend...`);
         try {
-            const [lng, lat] = generateRandomCoordinate();
-            // Calculate a simple severity based on the variance from the 1.0g baseline
-            const severity = parseFloat((Math.abs(BASELINE_Z - zVal) * 2).toFixed(2));
+            // CRITICAL FIX: Use actual vehicle position instead of random
+            const currentPos = vehiclePosition || route[0];
+            if (!currentPos) {
+                setStatusMsg(`❌ Cannot report: Vehicle position unknown.`);
+                return;
+            }
+            const [lat, lng] = currentPos;
+
+            const dbType = type === 'POTHOLE' ? 'pothole' : 'speedbreaker';
+
+            const variance = Math.abs(BASELINE_Z - zVal);
+            let dbSeverity = 'medium';
+            if (variance > 0.6) dbSeverity = 'critical';
+            else if (variance > 0.5) dbSeverity = 'high';
+            else if (variance <= 0.45) dbSeverity = 'low';
 
             const payload = {
-                type,
-                severity,
+                type: dbType,
+                severity: dbSeverity,
+                gForce: parseFloat(zVal.toFixed(2)),
                 location: {
                     type: 'Point',
-                    coordinates: [lng, lat]
+                    coordinates: [lng, lat] // Backend expects [longitude, latitude]
                 }
             };
 
             await axios.post('http://localhost:5000/api/anomalies', payload);
-            setStatusMsg(`✅ Successfully reported ${type} at ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+            setStatusMsg(`✅ Successfully reported ${dbType.toUpperCase()} at vehicle location.`);
 
-            // Notify parent (App.jsx) to refresh the Map
             if (onAnomalyDetected) {
                 onAnomalyDetected();
             }
@@ -57,61 +111,49 @@ const IoTSimulator = ({ onAnomalyDetected }) => {
     const processZValue = (val) => {
         setZValue(val);
 
-        // Detection Algorithm Logic
-        if (val < LOWER_LIMIT) {
-            reportAnomaly('POTHOLE', val);
-        } else if (val > UPPER_LIMIT) {
-            reportAnomaly('SPEED_BREAKER', val);
-        } else {
-            setStatusMsg('Monitoring normal driving vibration...');
-        }
+        if (val < LOWER_LIMIT) reportAnomaly('POTHOLE', val);
+        else if (val > UPPER_LIMIT) reportAnomaly('SPEED_BREAKER', val);
     };
 
-    // The Data Stream Generator
     useEffect(() => {
         if (isDriving) {
-            setStatusMsg('Monitoring normal driving vibration...');
-            intervalRef.current = setInterval(() => {
-                // Generate normal vibration: 0.9g to 1.1g
+            dataIntervalRef.current = setInterval(() => {
                 const minNormal = 0.9;
                 const maxNormal = 1.1;
                 const normalVal = Math.random() * (maxNormal - minNormal) + minNormal;
-
-                // We only want to set the UI Z-value here for the normal stream.
-                // We don't call processZValue because we know it's normal and don't want to constantly reset statusMsg.
-                setZValue(normalVal);
-            }, 100); // 100ms per requirements
+                setZValue(normalVal); // Just update UI, don't trigger checks
+            }, 100);
         } else {
-            if (intervalRef.current) clearInterval(intervalRef.current);
+            if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
             setZValue(BASELINE_Z);
-            setStatusMsg('Idle');
         }
 
         return () => {
-            if (intervalRef.current) clearInterval(intervalRef.current);
+            if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
         };
     }, [isDriving]);
 
-    // Manual Triggers - These bypass the normal interval
     const triggerPothole = () => {
         if (!isDriving) return;
-        const potholeVal = Math.random() * 0.5; // less than 0.5g
-        processZValue(potholeVal);
+        processZValue(Math.random() * 0.5);
     };
 
     const triggerSpeedBreaker = () => {
         if (!isDriving) return;
-        const speedBreakerVal = Math.random() * 0.5 + 1.5; // greater than 1.5g
-        processZValue(speedBreakerVal);
+        processZValue(Math.random() * 0.5 + 1.5);
     };
 
     return (
         <div style={{ padding: '15px', margin: '10px 0', border: '2px solid #333', borderRadius: '8px', backgroundColor: '#f9f9f9', marginBottom: '20px' }}>
             <h3>IoT Hardware Simulator (Z-Axis Vibration)</h3>
 
+            <p style={{ margin: '0 0 10px 0', fontSize: '0.9rem', color: '#555' }}>
+                <strong>Instructions:</strong> Click map twice to set Route (Start & Destination), then Start Driving.
+            </p>
+
             <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '15px' }}>
                 <button
-                    onClick={() => setIsDriving(!isDriving)}
+                    onClick={isDriving ? stopDriving : startDriving}
                     style={{
                         padding: '10px 20px',
                         backgroundColor: isDriving ? '#dc3545' : '#28a745',
@@ -119,8 +161,10 @@ const IoTSimulator = ({ onAnomalyDetected }) => {
                         border: 'none',
                         borderRadius: '4px',
                         cursor: 'pointer',
-                        fontWeight: 'bold'
+                        fontWeight: 'bold',
+                        opacity: route.length < 2 ? 0.6 : 1
                     }}
+                    disabled={route.length < 2 && !isDriving}
                 >
                     {isDriving ? 'Stop Driving' : 'Start Driving'}
                 </button>
@@ -131,16 +175,17 @@ const IoTSimulator = ({ onAnomalyDetected }) => {
             </div>
 
             <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                <button onClick={triggerPothole} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#ffc107', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
-                    Trigger Pothole (&lt;0.5g)
+                <button onClick={triggerPothole} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#dc3545', border: 'none', borderRadius: '4px', color: 'white', fontWeight: 'bold' }}>
+                    Force Pothole (&lt;0.5g)
                 </button>
-                <button onClick={triggerSpeedBreaker} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#fd7e14', border: 'none', borderRadius: '4px', color: 'white', fontWeight: 'bold' }}>
-                    Trigger Speed Breaker (&gt;1.5g)
+                <button onClick={triggerSpeedBreaker} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#ffc107', border: 'none', borderRadius: '4px', color: 'black', fontWeight: 'bold' }}>
+                    Force Speed Breaker (&gt;1.5g)
                 </button>
             </div>
 
             <div style={{ padding: '10px', backgroundColor: '#e9ecef', borderRadius: '4px', fontStyle: 'italic', fontWeight: '500' }}>
                 Status: {statusMsg}
+                {vehiclePosition && ` | Location: ${vehiclePosition[0].toFixed(4)}, ${vehiclePosition[1].toFixed(4)}`}
             </div>
         </div>
     );
