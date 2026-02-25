@@ -12,7 +12,7 @@ L.Icon.Default.mergeOptions({
     shadowUrl: markerShadow,
 });
 
-function Map() {
+function Map({ refreshKey }) {
     const [anomalies, setAnomalies] = useState([]);
 
     useEffect(() => {
@@ -25,7 +25,7 @@ function Map() {
             }
         };
         fetchAnomalies();
-    }, []);
+    }, [refreshKey]);
 
     const mapCenter = [10.7905, 78.7047]; // Latitude, Longitude for Trichy
 
