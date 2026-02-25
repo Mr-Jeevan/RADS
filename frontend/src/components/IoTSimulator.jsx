@@ -1,15 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import * as turf from '@turf/turf';
 
-const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePosition }) => {
+const IoTSimulator = ({
+    onAnomalyDetected,
+    startPoint,
+    endPoint,
+    route,
+    vehiclePosition,
+    setVehiclePosition,
+    trackingMode,
+    setTrackingMode
+}) => {
     const [isDriving, setIsDriving] = useState(false);
     const [zValue, setZValue] = useState(1.0);
     const [statusMsg, setStatusMsg] = useState('Idle');
 
     const dataIntervalRef = useRef(null);
     const motionIntervalRef = useRef(null);
-    // Track our progress along the route (0.0 to 1.0)
-    const progressRef = useRef(0);
+    const distanceRef = useRef(0); // Current distance travelled in kilometers
+    const watchIdRef = useRef(null); // Reference for the geolocation watcher
 
     // Constants
     const BASELINE_Z = 1.0;
@@ -17,16 +27,57 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
     const UPPER_LIMIT = BASELINE_Z + THRESHOLD; // 1.45g
     const LOWER_LIMIT = BASELINE_Z - THRESHOLD; // 0.55g
 
-    // --- Dynamic Routing Logic ---
+    // --- Geolocation Hook (Phase 3.0) ---
+    useEffect(() => {
+        if (trackingMode === 'REALTIME') {
+            if ("geolocation" in navigator) {
+                setStatusMsg('Initializing Real-Time Geolocation...');
+                watchIdRef.current = navigator.geolocation.watchPosition(
+                    (position) => {
+                        const { latitude, longitude } = position.coords;
+                        setVehiclePosition([latitude, longitude]);
+                        setStatusMsg(`Tracking GPS: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`);
+                    },
+                    (error) => {
+                        console.error('Geolocation error:', error);
+                        // Make error messages user-friendly
+                        if (error.code === 1) setStatusMsg('❌ GPS Error: Permission Denied');
+                        else if (error.code === 2) setStatusMsg('❌ GPS Error: Position Unavailable');
+                        else if (error.code === 3) setStatusMsg('❌ GPS Error: Timeout');
+                        else setStatusMsg(`❌ GPS Error: ${error.message}`);
+                    },
+                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+                );
+            } else {
+                setStatusMsg('❌ Geolocation is not supported by your browser.');
+            }
+        } else {
+            // Cleanup watch when switching away from REALTIME
+            if (watchIdRef.current !== null) {
+                navigator.geolocation.clearWatch(watchIdRef.current);
+                watchIdRef.current = null;
+                setStatusMsg('Idle (Auto Simulated Mode)');
+            }
+        }
+
+        // Cleanup on unmount
+        return () => {
+            if (watchIdRef.current !== null) {
+                navigator.geolocation.clearWatch(watchIdRef.current);
+            }
+        };
+    }, [trackingMode, setVehiclePosition]);
+
+    // --- Dynamic Routing Logic (Phase 2.5) ---
     const startDriving = () => {
-        if (!route || route.length < 2) {
+        if (!startPoint || !endPoint || !route || route.length < 2) {
             setStatusMsg('Please click on the map to set Start and Destination points first.');
             setIsDriving(false);
             return;
         }
         setIsDriving(true);
-        setStatusMsg('Driving along route...');
-        progressRef.current = 0;
+        setStatusMsg('Driving along route at 80 km/h...');
+        distanceRef.current = 0;
         setVehiclePosition(route[0]);
     };
 
@@ -35,25 +86,33 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
         setStatusMsg('Drive stopped.');
     };
 
-    // Calculate Interpolation
+    // Calculate Interpolation using Turf.js
     useEffect(() => {
-        if (isDriving && route.length === 2) {
-            const [startLat, startLng] = route[0];
-            const [endLat, endLng] = route[1];
+        if (trackingMode === 'REALTIME') {
+            setIsDriving(false); // Can't auto drive in realtime
+            return;
+        }
 
-            // Update position every 100ms
+        if (isDriving && route.length > 1) {
+            const turfCoords = route.map(pos => [pos[1], pos[0]]); // [lng, lat]
+            const line = turf.lineString(turfCoords);
+            const totalDistance = turf.length(line, { units: 'kilometers' });
+
+            // 80 km/h interpolation
+            const speedKmh = 80;
+            const distancePerTick = (speedKmh / 3600) * 0.1;
+
             motionIntervalRef.current = setInterval(() => {
-                progressRef.current += 0.005; // Adjust speed here (0.005 = 200 steps)
+                distanceRef.current += distancePerTick;
 
-                if (progressRef.current >= 1) {
+                if (distanceRef.current >= totalDistance) {
                     clearInterval(motionIntervalRef.current);
-                    setVehiclePosition([endLat, endLng]); // Ensure it lands exactly on destination
+                    setVehiclePosition(route[route.length - 1]);
                     stopDriving();
                     setStatusMsg('Destination reached!');
                 } else {
-                    const currentLat = startLat + (endLat - startLat) * progressRef.current;
-                    const currentLng = startLng + (endLng - startLng) * progressRef.current;
-                    setVehiclePosition([currentLat, currentLng]);
+                    const along = turf.along(line, distanceRef.current, { units: 'kilometers' });
+                    setVehiclePosition([along.geometry.coordinates[1], along.geometry.coordinates[0]]); // [lat, lng]
                 }
             }, 100);
         } else {
@@ -63,15 +122,14 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
         return () => {
             if (motionIntervalRef.current) clearInterval(motionIntervalRef.current);
         };
-    }, [isDriving, route]);
+    }, [isDriving, route, trackingMode, setVehiclePosition]);
 
 
     // --- Anomaly Logic ---
     const reportAnomaly = async (type, zVal) => {
         setStatusMsg(`Detected ${type} at ${zVal.toFixed(2)}g! Sending to backend...`);
         try {
-            // CRITICAL FIX: Use actual vehicle position instead of random
-            const currentPos = vehiclePosition || route[0];
+            const currentPos = vehiclePosition || startPoint;
             if (!currentPos) {
                 setStatusMsg(`❌ Cannot report: Vehicle position unknown.`);
                 return;
@@ -92,7 +150,7 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
                 gForce: parseFloat(zVal.toFixed(2)),
                 location: {
                     type: 'Point',
-                    coordinates: [lng, lat] // Backend expects [longitude, latitude]
+                    coordinates: [lng, lat]
                 }
             };
 
@@ -110,18 +168,18 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
 
     const processZValue = (val) => {
         setZValue(val);
-
         if (val < LOWER_LIMIT) reportAnomaly('POTHOLE', val);
         else if (val > UPPER_LIMIT) reportAnomaly('SPEED_BREAKER', val);
     };
 
+    // Simulate normal vibration stream only when driving in auto mode or just constantly in realtime mode
     useEffect(() => {
-        if (isDriving) {
+        if (isDriving || trackingMode === 'REALTIME') {
             dataIntervalRef.current = setInterval(() => {
                 const minNormal = 0.9;
                 const maxNormal = 1.1;
                 const normalVal = Math.random() * (maxNormal - minNormal) + minNormal;
-                setZValue(normalVal); // Just update UI, don't trigger checks
+                setZValue(normalVal);
             }, 100);
         } else {
             if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
@@ -131,43 +189,73 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
         return () => {
             if (dataIntervalRef.current) clearInterval(dataIntervalRef.current);
         };
-    }, [isDriving]);
+    }, [isDriving, trackingMode]);
 
-    const triggerPothole = () => {
-        if (!isDriving) return;
-        processZValue(Math.random() * 0.5);
-    };
-
-    const triggerSpeedBreaker = () => {
-        if (!isDriving) return;
-        processZValue(Math.random() * 0.5 + 1.5);
-    };
+    const triggerPothole = () => processZValue(Math.random() * 0.5);
+    const triggerSpeedBreaker = () => processZValue(Math.random() * 0.5 + 1.5);
 
     return (
         <div style={{ padding: '15px', margin: '10px 0', border: '2px solid #333', borderRadius: '8px', backgroundColor: '#f9f9f9', marginBottom: '20px' }}>
-            <h3>IoT Hardware Simulator (Z-Axis Vibration)</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3>IoT Hardware Simulator (Z-Axis Vibration - Phase 3.0)</h3>
+
+                {/* Tracking Mode Toggles */}
+                <div style={{ display: 'flex', gap: '5px' }}>
+                    <button
+                        onClick={() => setTrackingMode('AUTO')}
+                        style={{
+                            padding: '6px 12px',
+                            backgroundColor: trackingMode === 'AUTO' ? '#0d6efd' : '#e9ecef',
+                            color: trackingMode === 'AUTO' ? 'white' : 'black',
+                            border: '1px solid #ccc',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        Auto Route
+                    </button>
+                    <button
+                        onClick={() => setTrackingMode('REALTIME')}
+                        style={{
+                            padding: '6px 12px',
+                            backgroundColor: trackingMode === 'REALTIME' ? '#0d6efd' : '#e9ecef',
+                            color: trackingMode === 'REALTIME' ? 'white' : 'black',
+                            border: '1px solid #ccc',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        Real-Time GPS
+                    </button>
+                </div>
+            </div>
 
             <p style={{ margin: '0 0 10px 0', fontSize: '0.9rem', color: '#555' }}>
-                <strong>Instructions:</strong> Click map twice to set Route (Start & Destination), then Start Driving.
+                {trackingMode === 'AUTO'
+                    ? <strong>Auto Mode: Click map twice to set OSRM Route, then Start Driving.</strong>
+                    : <strong>Real-Time Mode: Tracking physical device location via GPS.</strong>
+                }
             </p>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '15px' }}>
-                <button
-                    onClick={isDriving ? stopDriving : startDriving}
-                    style={{
-                        padding: '10px 20px',
-                        backgroundColor: isDriving ? '#dc3545' : '#28a745',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontWeight: 'bold',
-                        opacity: route.length < 2 ? 0.6 : 1
-                    }}
-                    disabled={route.length < 2 && !isDriving}
-                >
-                    {isDriving ? 'Stop Driving' : 'Start Driving'}
-                </button>
+                {trackingMode === 'AUTO' && (
+                    <button
+                        onClick={isDriving ? stopDriving : startDriving}
+                        style={{
+                            padding: '10px 20px',
+                            backgroundColor: isDriving ? '#dc3545' : '#28a745',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontWeight: 'bold',
+                            opacity: (!startPoint || !endPoint) ? 0.6 : 1
+                        }}
+                        disabled={(!startPoint || !endPoint) && !isDriving}
+                    >
+                        {isDriving ? 'Stop Driving' : 'Start Simulated Drive'}
+                    </button>
+                )}
 
                 <div style={{ fontSize: '1.2rem', fontWeight: 'bold' }}>
                     Live Z-Axis: <span style={{ color: zValue < LOWER_LIMIT || zValue > UPPER_LIMIT ? 'red' : 'green' }}>{zValue.toFixed(2)}g</span>
@@ -175,17 +263,38 @@ const IoTSimulator = ({ onAnomalyDetected, route, vehiclePosition, setVehiclePos
             </div>
 
             <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                <button onClick={triggerPothole} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#dc3545', border: 'none', borderRadius: '4px', color: 'white', fontWeight: 'bold' }}>
+                <button
+                    onClick={triggerPothole}
+                    disabled={trackingMode === 'AUTO' && !isDriving}
+                    style={{
+                        padding: '8px 15px',
+                        cursor: (trackingMode === 'AUTO' && !isDriving) ? 'not-allowed' : 'pointer',
+                        backgroundColor: '#dc3545',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: 'white',
+                        fontWeight: 'bold'
+                    }}>
                     Force Pothole (&lt;0.5g)
                 </button>
-                <button onClick={triggerSpeedBreaker} disabled={!isDriving} style={{ padding: '8px 15px', cursor: isDriving ? 'pointer' : 'not-allowed', backgroundColor: '#ffc107', border: 'none', borderRadius: '4px', color: 'black', fontWeight: 'bold' }}>
+                <button
+                    onClick={triggerSpeedBreaker}
+                    disabled={trackingMode === 'AUTO' && !isDriving}
+                    style={{
+                        padding: '8px 15px',
+                        cursor: (trackingMode === 'AUTO' && !isDriving) ? 'not-allowed' : 'pointer',
+                        backgroundColor: '#ffc107',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: 'black',
+                        fontWeight: 'bold'
+                    }}>
                     Force Speed Breaker (&gt;1.5g)
                 </button>
             </div>
 
             <div style={{ padding: '10px', backgroundColor: '#e9ecef', borderRadius: '4px', fontStyle: 'italic', fontWeight: '500' }}>
                 Status: {statusMsg}
-                {vehiclePosition && ` | Location: ${vehiclePosition[0].toFixed(4)}, ${vehiclePosition[1].toFixed(4)}`}
             </div>
         </div>
     );

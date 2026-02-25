@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMapEvents, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
@@ -37,23 +37,60 @@ const destIcon = createCustomIcon('#17a2b8', 'B'); // Teal Dest
 const vehicleIcon = createCustomIcon('#007bff', '🚗'); // Blue Car
 
 // ------------------------------------------------------------------
+// Map Centerer (Phase 3.0)
+// Auto-pans the map to the vehicle's live GPS location
+// ------------------------------------------------------------------
+const MapCenterer = ({ vehiclePosition, trackingMode }) => {
+    const map = useMap();
+    useEffect(() => {
+        if (trackingMode === 'REALTIME' && vehiclePosition) {
+            map.flyTo(vehiclePosition, map.getZoom(), {
+                animate: true,
+                duration: 1.5 // Smooth animation
+            });
+        }
+    }, [vehiclePosition, trackingMode, map]);
+    return null;
+};
+
+// ------------------------------------------------------------------
 // Map Click Handler Component
 // ------------------------------------------------------------------
-const MapClickSetup = ({ route, setRoute, setVehiclePosition }) => {
+const MapClickSetup = ({ startPoint, setStartPoint, endPoint, setEndPoint, setRoute, setVehiclePosition, trackingMode }) => {
     useMapEvents({
-        click(e) {
+        async click(e) {
+            // Disable manual routing if we are in real-time tracking mode
+            if (trackingMode === 'REALTIME') return;
+
             const { lat, lng } = e.latlng;
-            if (route.length === 0) {
-                // Set Start Point
-                setRoute([[lat, lng]]);
+
+            if (!startPoint || (startPoint && endPoint)) {
+                // First click, or reset everything if clicked a 3rd time
+                setStartPoint([lat, lng]);
+                setEndPoint(null);
+                setRoute([]);
                 setVehiclePosition([lat, lng]); // Vehicle begins at Start
-            } else if (route.length === 1) {
-                // Set Destination Point
-                setRoute([...route, [lat, lng]]);
-            } else {
-                // Reset route if clicked again after both are set
-                setRoute([[lat, lng]]);
-                setVehiclePosition([lat, lng]);
+            } else if (startPoint && !endPoint) {
+                // Second click: Set Destination and Fetch Route
+                setEndPoint([lat, lng]);
+                try {
+                    // Fetch real road route from OSRM
+                    const response = await axios.get(
+                        `https://router.project-osrm.org/route/v1/driving/${startPoint[1]},${startPoint[0]};${lng},${lat}?overview=full&geometries=geojson`
+                    );
+
+                    if (response.data.routes && response.data.routes.length > 0) {
+                        // OSRM returns coordinates in [lng, lat] format
+                        const geoJsonCoords = response.data.routes[0].geometry.coordinates;
+
+                        // Convert to [lat, lng] for Leaflet Polyline
+                        const leafletRoute = geoJsonCoords.map(coord => [coord[1], coord[0]]);
+                        setRoute(leafletRoute);
+                    }
+                } catch (error) {
+                    console.error("OSRM Route fetching error:", error);
+                    alert("Failed to fetch route. OSRM API might be rate-limiting.");
+                }
             }
         }
     });
@@ -63,7 +100,7 @@ const MapClickSetup = ({ route, setRoute, setVehiclePosition }) => {
 // ------------------------------------------------------------------
 // Main Map Component
 // ------------------------------------------------------------------
-function Map({ refreshKey, route, setRoute, vehiclePosition, setVehiclePosition }) {
+function Map({ refreshKey, startPoint, setStartPoint, endPoint, setEndPoint, route, setRoute, vehiclePosition, setVehiclePosition, trackingMode }) {
     const [anomalies, setAnomalies] = useState([]);
 
     useEffect(() => {
@@ -78,7 +115,7 @@ function Map({ refreshKey, route, setRoute, vehiclePosition, setVehiclePosition 
         fetchAnomalies();
     }, [refreshKey]);
 
-    const mapCenter = [10.7905, 78.7047]; // Trichy
+    const mapCenter = [10.7905, 78.7047]; // Trichy default
 
     return (
         <MapContainer center={mapCenter} zoom={13} style={{ height: '70vh', width: '100%' }}>
@@ -87,13 +124,23 @@ function Map({ refreshKey, route, setRoute, vehiclePosition, setVehiclePosition 
                 url='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
             />
 
+            {/* Auto-pan logic when tracking real device */}
+            <MapCenterer vehiclePosition={vehiclePosition} trackingMode={trackingMode} />
+
             {/* Click listener to set route */}
-            <MapClickSetup route={route} setRoute={setRoute} setVehiclePosition={setVehiclePosition} />
+            <MapClickSetup
+                startPoint={startPoint} setStartPoint={setStartPoint}
+                endPoint={endPoint} setEndPoint={setEndPoint}
+                setRoute={setRoute} setVehiclePosition={setVehiclePosition}
+                trackingMode={trackingMode}
+            />
 
             {/* Render User Route and Vehicle */}
-            {route.length > 0 && <Marker position={route[0]} icon={startIcon}><Popup>Start Point</Popup></Marker>}
-            {route.length > 1 && <Marker position={route[1]} icon={destIcon}><Popup>Destination</Popup></Marker>}
-            {route.length > 1 && <Polyline positions={route} color="blue" weight={4} opacity={0.6} />}
+            {trackingMode === 'AUTO' && startPoint && <Marker position={startPoint} icon={startIcon}><Popup>Start Point</Popup></Marker>}
+            {trackingMode === 'AUTO' && endPoint && <Marker position={endPoint} icon={destIcon}><Popup>Destination</Popup></Marker>}
+            {trackingMode === 'AUTO' && route.length > 0 && <Polyline positions={route} color="blue" weight={5} opacity={0.6} />}
+
+            {/* The Vehicle renders in both modes exactly where the state says it is */}
             {vehiclePosition && <Marker position={vehiclePosition} icon={vehicleIcon}><Popup>Live Vehicle Simulation</Popup></Marker>}
 
             {/* Render Fetched Anomalies */}
