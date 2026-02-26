@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import api from '../services/api';
 import * as turf from '@turf/turf';
 
 const IoTSimulator = ({
@@ -154,7 +154,7 @@ const IoTSimulator = ({
                 }
             };
 
-            await axios.post('http://localhost:5000/api/anomalies', payload);
+            await api.post('/api/anomalies', payload);
             setStatusMsg(`✅ Successfully reported ${dbType.toUpperCase()} at vehicle location.`);
 
             if (onAnomalyDetected) {

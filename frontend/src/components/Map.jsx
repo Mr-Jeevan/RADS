@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, useMapEvents, useMap 
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
+import api from '../services/api';
 
 // ------------------------------------------------------------------
 // Custom Icons
@@ -106,7 +107,7 @@ function Map({ refreshKey, startPoint, setStartPoint, endPoint, setEndPoint, rou
     useEffect(() => {
         const fetchAnomalies = async () => {
             try {
-                const response = await axios.get('http://localhost:5000/api/anomalies');
+                const response = await api.get('/api/anomalies');
                 setAnomalies(response.data);
             } catch (error) {
                 console.error('Error fetching anomalies:', error);
