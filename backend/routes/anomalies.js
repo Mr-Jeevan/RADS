@@ -2,19 +2,29 @@ const express = require('express');
 const router = express.Router();
 const Anomaly = require('../models/Anomaly');
 
-// @route   POST api/anomalies
-// @desc    Receive anomaly data from IoT sensor or Frontend
+// POST
 router.post('/', async (req, res) => {
-    // 1. Log the incoming data to the terminal
-    console.log("📥 [IoT Data Received]:", JSON.stringify(req.body, null, 2));
 
     try {
         const { type, severity, gForce, location } = req.body;
 
-        // 2. Simple validation check
-        if (!type || !location) {
-            console.error("⚠️ [Validation Failed]: Missing type or location");
-            return res.status(400).json({ msg: 'Please include all fields' });
+        if (!type || !location || !location.coordinates) {
+            return res.status(400).json({ msg: 'Invalid data' });
+        }
+
+        // 🔥 Duplicate prevention (10 meters)
+        const existing = await Anomaly.findOne({
+            type,
+            location: {
+                $near: {
+                    $geometry: location,
+                    $maxDistance: 10
+                }
+            }
+        });
+
+        if (existing) {
+            return res.status(200).json({ msg: 'Duplicate ignored' });
         }
 
         const newAnomaly = new Anomaly({
@@ -24,27 +34,24 @@ router.post('/', async (req, res) => {
             location
         });
 
-        const anomaly = await newAnomaly.save();
-        
-        // 3. Log success
-        console.log("✅ [Database]: Saved successfully with ID:", anomaly._id);
-        res.status(201).json(anomaly);
+        const saved = await newAnomaly.save();
+
+        console.log("✅ Saved:", saved._id);
+
+        res.status(201).json(saved);
 
     } catch (err) {
-        // 4. Log the specific error for debugging
-        console.error("❌ [Server Error]:", err.message);
+        console.error(err.message);
         res.status(500).send('Server Error');
     }
 });
 
-// @route   GET api/anomalies
-// @desc    Get all anomalies for the map
+// GET
 router.get('/', async (req, res) => {
     try {
         const anomalies = await Anomaly.find().sort({ reportedAt: -1 });
         res.json(anomalies);
     } catch (err) {
-        console.error(err.message);
         res.status(500).send('Server Error');
     }
 });

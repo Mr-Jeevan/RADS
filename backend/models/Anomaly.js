@@ -20,15 +20,21 @@ const AnomalySchema = new mongoose.Schema({
         trim: true
     },
     location: {
-        // GeoJSON Point
         type: {
             type: String,
             enum: ['Point'],
-            required: true
+            required: true,
+            default: 'Point'
         },
         coordinates: {
-            type: [Number], // [longitude, latitude]
-            required: true
+            type: [Number], // [lng, lat]
+            required: true,
+            validate: {
+                validator: function (val) {
+                    return val.length === 2;
+                },
+                message: 'Coordinates must be [lng, lat]'
+            }
         }
     },
     imageUrl: {
