@@ -2,6 +2,8 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const connectDB = require('./config/db');
+const http = require('http');
+const { Server } = require('socket.io');
 
 // Load env vars
 dotenv.config();
@@ -10,7 +12,27 @@ dotenv.config();
 connectDB();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: '*', // Allow all origins for dev, adjust for prod
+        methods: ['GET', 'POST']
+    }
+});
 
+// Global vehicle state
+global.vehicleState = { isDriving: false, position: null };
+
+io.on('connection', (socket) => {
+    socket.on('sync_vehicle_status', (data) => {
+        global.vehicleState.isDriving = data.isDriving;
+        global.vehicleState.position = data.position;
+        console.log(`[Socket] Vehicle state synced: isDriving=${data.isDriving}`);
+    });
+});
+
+// Expose socket server to frontend routes
+app.set('io', io);
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -40,7 +62,7 @@ const PORT = process.env.PORT || 5000;
 
 
 // Add '0.0.0.0' to tell it to listen to external devices on the hotspot
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Ready to receive IoT data on your local IP!`);
 });

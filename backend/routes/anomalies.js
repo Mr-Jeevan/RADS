@@ -6,11 +6,17 @@ const Anomaly = require('../models/Anomaly');
 router.post('/', async (req, res) => {
 
     try {
-        const { type, severity, gForce, location } = req.body;
+        const { type, severity, gForce } = req.body;
+        const { isDriving, position } = global.vehicleState || {};
 
-        if (!type || !location || !location.coordinates) {
-            return res.status(400).json({ msg: 'Invalid data' });
+        if (!type || gForce === undefined || !isDriving || !position) {
+            return res.status(400).json({ msg: 'Ignored: Missing sensor data or vehicle is not moving.' });
         }
+
+        const location = {
+            type: 'Point',
+            coordinates: [position[1], position[0]]
+        };
 
         // 🔥 Duplicate prevention (10 meters)
         const existing = await Anomaly.findOne({
@@ -37,6 +43,12 @@ router.post('/', async (req, res) => {
         const saved = await newAnomaly.save();
 
         console.log("✅ Saved:", saved._id);
+
+        // Emit new anomaly to all connected clients
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('newAnomaly', saved);
+        }
 
         res.status(201).json(saved);
 

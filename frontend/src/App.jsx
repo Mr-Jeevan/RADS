@@ -1,10 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { io } from 'socket.io-client';
 import Map from './components/Map';
 import IoTSimulator from './components/IoTSimulator';
 import './index.css';
 
 function App() {
     const [refreshKey, setRefreshKey] = useState(0);
+    const [socket, setSocket] = useState(null);
+
+    useEffect(() => {
+        // Connect to the backend
+        const backendUrl = 'http://localhost:5000';
+        const newSocket = io(backendUrl);
+        setSocket(newSocket);
+
+        newSocket.on('newAnomaly', (data) => {
+            console.log('Real-time anomaly received via WebSocket:', data);
+            setRefreshKey(prev => prev + 1);
+        });
+
+        // Cleanup connection on component unmount
+        return () => {
+            newSocket.disconnect();
+        };
+    }, []);
 
     // Phase 2.5: Shared State for Real Road Routing & Moving Vehicle
     const [startPoint, setStartPoint] = useState(null);
@@ -27,6 +46,7 @@ function App() {
 
             <div style={{ padding: '0 20px' }}>
                 <IoTSimulator
+                    socket={socket}
                     onAnomalyDetected={handleAnomalyDetected}
                     startPoint={startPoint}
                     endPoint={endPoint}
